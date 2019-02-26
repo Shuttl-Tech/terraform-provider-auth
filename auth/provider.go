@@ -72,8 +72,8 @@ func Provider() terraform.ResourceProvider {
 
 		ConfigureFunc: providerConfigure,
 
-		ResourcesMap: map[string]*schema.Resource{
-			"auth_vault": vaultAuthResource(),
+		DataSourcesMap: map[string]*schema.Resource{
+			"auth_vault": vaultAuthDataSource(),
 		},
 	}
 }

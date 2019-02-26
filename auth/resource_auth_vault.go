@@ -10,11 +10,9 @@ import (
 	"time"
 )
 
-func vaultAuthResource() *schema.Resource {
+func vaultAuthDataSource() *schema.Resource {
 	return &schema.Resource{
-		Create: vaultAuthLoginCreate,
-		Read:   vaultAuthLoginRead,
-		Delete: vaultAuthLoginDelete,
+		Read: vaultAuthLoginRead,
 
 		Schema: map[string]*schema.Schema{
 			"auth_backend": {
@@ -36,13 +34,6 @@ func vaultAuthResource() *schema.Resource {
 				Optional:    true,
 				Description: "Mount path of the auth backend",
 				ForceNew:    true,
-			},
-			"revoke_on_delete": {
-				Type:        schema.TypeBool,
-				Optional:    true,
-				Default:     true,
-				ForceNew:    true,
-				Description: "Revoke the authentication token tree when the resource is deleted.",
 			},
 			"aws": {
 				Type:     schema.TypeList,
@@ -157,10 +148,6 @@ func vaultAuthResource() *schema.Resource {
 	}
 }
 
-func vaultAuthLoginCreate(d *schema.ResourceData, meta interface{}) error {
-	return vaultAuthLoginRead(d, meta)
-}
-
 func vaultAuthLoginRead(d *schema.ResourceData, meta interface{}) error {
 	rconf := meta.(*Config)
 
@@ -177,28 +164,6 @@ func vaultAuthLoginRead(d *schema.ResourceData, meta interface{}) error {
 	}
 
 	return fmt.Errorf("unsupported auth_backend %q", d.Get("auth_backend"))
-}
-
-func vaultAuthLoginDelete(d *schema.ResourceData, meta interface{}) error {
-	if !d.Get("revoke_on_delete").(bool) {
-		return nil
-	}
-
-	cfg := meta.(*Config)
-	client := cfg.Vault
-
-	token, ok := d.GetOk("client_token")
-	if !ok {
-		return nil
-	}
-
-	client.SetToken(token.(string))
-	err := client.Auth().Token().RevokeTree(token.(string))
-	if err != nil {
-		return err
-	}
-
-	return nil
 }
 
 func vaultAuthLoginWithAWS(d *schema.ResourceData, client *api.Client, awsConfig map[string]interface{}) error {

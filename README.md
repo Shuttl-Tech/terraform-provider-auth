@@ -22,18 +22,17 @@ providers are supported at the moment:
    - cert_file: (required) Path to a file containing the client certificate.
    - key_file: (required) Path to a file containing the private key that the certificate was issued for.
    
-### Resources
+### Data Provider
 
-Following resources are provided by Auth provider:
+Following data sources are provided by Auth provider:
 
  - auth_vault: Authenticate with Hashicorp Vault
 
-*auth_vault* resource expects following attributes:
+*auth_vault* data source expects following attributes:
 
  - auth_backend: (required) Name of Vault auth backend. Only 'aws' is supported at this time.
  - role: (required) Name of the vault role against which Terraform will try to authenticate.
  - mount_path: (required) Vault mount path of the auth backend.
- - revoke_on_delete: (optional: bool) If true Terraform will attempt to revoke the token tree when the resource is destroyed. Defaults to `true`
  - aws: (required when `auth_backend` is `aws`) Nested configuration block:
    - use_ec2_metadata: Use EC2 instance metadata and IAM role to authenticate with Vault. No other attribute is supported when this is set.
    - identity: Base64-encoded EC2 instance identity document to authenticate with.
