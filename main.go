@@ -3,7 +3,7 @@ package main
 import (
 	"fmt"
 	"github.com/Shuttl-Tech/terraform-provider-auth/auth"
-	"github.com/hashicorp/terraform/plugin"
+	"github.com/hashicorp/terraform-plugin-sdk/plugin"
 )
 
 const Version = "0.0.2"
