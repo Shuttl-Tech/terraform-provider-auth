@@ -2,12 +2,13 @@ package auth
 
 import (
 	"fmt"
+	"strings"
+	"time"
+
 	"github.com/hashicorp/terraform-plugin-sdk/helper/schema"
 	"github.com/hashicorp/terraform-plugin-sdk/helper/validation"
 	"github.com/hashicorp/vault/api"
 	credAws "github.com/hashicorp/vault/builtin/credential/aws"
-	"strings"
-	"time"
 )
 
 func vaultAuthDataSource() *schema.Resource {
@@ -34,6 +35,12 @@ func vaultAuthDataSource() *schema.Resource {
 				Optional:    true,
 				Description: "Mount path of the auth backend",
 				ForceNew:    true,
+			},
+			"region": {
+				Type:        schema.TypeString,
+				Optional:    true,
+				Description: "AWS region name to send to STS",
+				ForceNew:    false,
 			},
 			"aws": {
 				Type:     schema.TypeList,
@@ -183,6 +190,10 @@ func vaultAuthLoginWithAWS(d *schema.ResourceData, client *api.Client, awsConfig
 			"aws_access_key_id":     "",
 			"aws_secret_access_key": "",
 			"aws_security_token":    "",
+		}
+
+		if v, ok := d.GetOk("region"); ok {
+			meta["region"] = v.(string)
 		}
 
 		secret, err = handler.Auth(client, meta)
