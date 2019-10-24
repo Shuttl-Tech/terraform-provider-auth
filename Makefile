@@ -2,9 +2,6 @@
 MKFILE_PATH := $(lastword $(MAKEFILE_LIST))
 CURRENT_DIR := $(patsubst %/,%,$(dir $(realpath $(MKFILE_PATH))))
 
-# Ensure GOPATH
-GOPATH ?= $(HOME)/go
-
 # List all our actual files, excluding vendor
 GOFILES ?= $(shell go list $(TEST) | grep -v /vendor/)
 
@@ -16,12 +13,10 @@ GOMAXPROCS ?= 4
 
 # Get the project metadata
 GOVERSION := 1.13.1
-PROJECT := $(CURRENT_DIR:$(GOPATH)/src/%=%)
-OWNER := $(notdir $(patsubst %/,%,$(dir $(PROJECT))))
+PROJECT := github.com/Shuttl-Tech/terraform-provider-auth
 NAME := $(notdir $(PROJECT))
 GIT_COMMIT ?= $(shell git rev-parse --short HEAD)
 VERSION := $(shell awk -F\" '/Version/ { print $$2; exit }' "${CURRENT_DIR}/main.go")
-EXTERNAL_TOOLS ?=
 
 # Current system information
 GOOS ?= $(shell go env GOOS)
@@ -81,33 +76,6 @@ define make-xc-target
 endef
 $(foreach goarch,$(XC_ARCH),$(foreach goos,$(XC_OS),$(eval $(call make-xc-target,$(goos),$(goarch),$(if $(findstring windows,$(goos)),.exe,)))))
 
-# bootstrap installs the necessary go tools for development or build.
-bootstrap:
-	@echo "==> Bootstrapping ${PROJECT}"
-	@for t in ${EXTERNAL_TOOLS}; do \
-		echo "--> Installing $$t" ; \
-		go get -u "$$t"; \
-	done
-.PHONY: bootstrap
-
-# deps updates all dependencies for this project.
-deps:
-	@echo "==> Updating deps for ${PROJECT}"
-	@dep ensure -update
-	@dep prune
-.PHONY: deps
-
-# dev builds and installs the project locally.
-dev:
-	@echo "==> Installing ${NAME} for ${GOOS}/${GOARCH}"
-	@rm -f "${GOPATH}/pkg/${GOOS}_${GOARCH}/${PROJECT}/version.a" # ldflags change and go doesn't detect
-	@env \
-		CGO_ENABLED="0" \
-		go install \
-			-ldflags "${LD_FLAGS}" \
-			-tags "${GOTAGS}"
-.PHONY: dev
-
 # dist builds the binaries and then signs and packages them for distribution
 dist:
 ifndef GPG_KEY
@@ -125,13 +93,35 @@ endif
 # test runs the test suite.
 test: fmtcheck errcheck
 	@echo "==> Testing ${NAME}"
-	@go test -v -timeout=300s -parallel=20 -tags="${GOTAGS}" ${GOFILES} ${TESTARGS}
+	@docker run \
+		--interactive \
+		--rm \
+		--dns="8.8.8.8" \
+		--volume="${CURRENT_DIR}:/go/src/${PROJECT}" \
+		--workdir="/go/src/${PROJECT}" \
+		"golang:${GOVERSION}" \
+		env \
+			CGO_ENABLED="0" \
+			GOOS="${1}" \
+			GOARCH="${2}" \
+			go test -v -timeout=300s -parallel=20 -tags="${GOTAGS}" ${GOFILES} ${TESTARGS}
 .PHONY: test
 
 # test-race runs the test suite.
 test-race: fmtcheck errcheck
 	@echo "==> Testing ${NAME} (race)"
-	@go test -v -timeout=300s -race -tags="${GOTAGS}" ${GOFILES} ${TESTARGS}
+	@docker run \
+		--interactive \
+		--rm \
+		--dns="8.8.8.8" \
+		--volume="${CURRENT_DIR}:/go/src/${PROJECT}" \
+		--workdir="/go/src/${PROJECT}" \
+		"golang:${GOVERSION}" \
+		env \
+			CGO_ENABLED="0" \
+			GOOS="${1}" \
+			GOARCH="${2}" \
+			go test -v -timeout=300s -race -tags="${GOTAGS}" ${GOFILES} ${TESTARGS}
 .PHONY: test-race
 
 # _cleanup removes any previous binaries
