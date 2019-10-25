@@ -23,11 +23,10 @@ import (
 	cleanhttp "github.com/hashicorp/go-cleanhttp"
 	uuid "github.com/hashicorp/go-uuid"
 	"github.com/hashicorp/vault/helper/awsutil"
-	"github.com/hashicorp/vault/sdk/framework"
-	"github.com/hashicorp/vault/sdk/helper/cidrutil"
-	"github.com/hashicorp/vault/sdk/helper/jsonutil"
-	"github.com/hashicorp/vault/sdk/helper/strutil"
-	"github.com/hashicorp/vault/sdk/logical"
+	"github.com/hashicorp/vault/helper/jsonutil"
+	"github.com/hashicorp/vault/helper/strutil"
+	"github.com/hashicorp/vault/logical"
+	"github.com/hashicorp/vault/logical/framework"
 )
 
 const (
@@ -598,23 +597,12 @@ func (b *backend) pathLoginUpdateEc2(ctx context.Context, req *logical.Request, 
 	}
 
 	// Get the entry for the role used by the instance
-	roleEntry, err := b.role(ctx, req.Storage, roleName)
+	roleEntry, err := b.lockedAWSRole(ctx, req.Storage, roleName)
 	if err != nil {
 		return nil, err
 	}
 	if roleEntry == nil {
 		return logical.ErrorResponse(fmt.Sprintf("entry for role %q not found", roleName)), nil
-	}
-
-	// Check for a CIDR match.
-	if len(roleEntry.TokenBoundCIDRs) > 0 {
-		if req.Connection == nil {
-			b.Logger().Warn("token bound CIDRs found but no connection information available for validation")
-			return nil, logical.ErrPermissionDenied
-		}
-		if !cidrutil.RemoteAddrIsOk(req.Connection.RemoteAddr, roleEntry.TokenBoundCIDRs) {
-			return nil, logical.ErrPermissionDenied
-		}
 	}
 
 	if roleEntry.AuthType != ec2AuthType {
@@ -741,14 +729,14 @@ func (b *backend) pathLoginUpdateEc2(ctx context.Context, req *logical.Request, 
 	// attacks.
 	shortestMaxTTL := b.System().MaxLeaseTTL()
 	longestMaxTTL := b.System().MaxLeaseTTL()
-	if roleEntry.TokenMaxTTL > time.Duration(0) && roleEntry.TokenMaxTTL < shortestMaxTTL {
-		shortestMaxTTL = roleEntry.TokenMaxTTL
+	if roleEntry.MaxTTL > time.Duration(0) && roleEntry.MaxTTL < shortestMaxTTL {
+		shortestMaxTTL = roleEntry.MaxTTL
 	}
-	if roleEntry.TokenMaxTTL > longestMaxTTL {
-		longestMaxTTL = roleEntry.TokenMaxTTL
+	if roleEntry.MaxTTL > longestMaxTTL {
+		longestMaxTTL = roleEntry.MaxTTL
 	}
 
-	policies := roleEntry.TokenPolicies
+	policies := roleEntry.Policies
 	rTagMaxTTL := time.Duration(0)
 	var roleTagResp *roleTagLoginResponse
 	if roleEntry.RoleTag != "" {
@@ -824,26 +812,28 @@ func (b *backend) pathLoginUpdateEc2(ctx context.Context, req *logical.Request, 
 		return nil, err
 	}
 
-	auth := &logical.Auth{
-		Metadata: map[string]string{
-			"instance_id":      identityDocParsed.InstanceID,
-			"region":           identityDocParsed.Region,
-			"account_id":       identityDocParsed.AccountID,
-			"role_tag_max_ttl": rTagMaxTTL.String(),
-			"role":             roleName,
-			"ami_id":           identityDocParsed.AmiID,
-		},
-		Alias: &logical.Alias{
-			Name: identityAlias,
-		},
-	}
-	roleEntry.PopulateTokenAuth(auth)
-
 	resp := &logical.Response{
-		Auth: auth,
+		Auth: &logical.Auth{
+			Period:   roleEntry.Period,
+			Policies: policies,
+			Metadata: map[string]string{
+				"instance_id":      identityDocParsed.InstanceID,
+				"region":           identityDocParsed.Region,
+				"account_id":       identityDocParsed.AccountID,
+				"role_tag_max_ttl": rTagMaxTTL.String(),
+				"role":             roleName,
+				"ami_id":           identityDocParsed.AmiID,
+			},
+			LeaseOptions: logical.LeaseOptions{
+				Renewable: true,
+				TTL:       roleEntry.TTL,
+				MaxTTL:    shortestMaxTTL,
+			},
+			Alias: &logical.Alias{
+				Name: identityAlias,
+			},
+		},
 	}
-	resp.Auth.Policies = policies
-	resp.Auth.LeaseOptions.MaxTTL = shortestMaxTTL
 
 	// Return the nonce only if reauthentication is allowed and if the nonce
 	// was not supplied by the user.
@@ -919,7 +909,7 @@ func (b *backend) handleRoleTagLogin(ctx context.Context, s logical.Storage, rol
 	}
 
 	// Ensure that the policies on the RoleTag is a subset of policies on the role
-	if !strutil.StrListSubset(roleEntry.TokenPolicies, rTag.Policies) {
+	if !strutil.StrListSubset(roleEntry.Policies, rTag.Policies) {
 		return nil, fmt.Errorf("policies on the role tag must be subset of policies on the role")
 	}
 
@@ -961,7 +951,7 @@ func (b *backend) pathLoginRenewIam(ctx context.Context, req *logical.Request, d
 	if roleName == "" {
 		return nil, fmt.Errorf("error retrieving role_name during renewal")
 	}
-	roleEntry, err := b.role(ctx, req.Storage, roleName)
+	roleEntry, err := b.lockedAWSRole(ctx, req.Storage, roleName)
 	if err != nil {
 		return nil, err
 	}
@@ -1049,9 +1039,9 @@ func (b *backend) pathLoginRenewIam(ctx context.Context, req *logical.Request, d
 	}
 
 	resp := &logical.Response{Auth: req.Auth}
-	resp.Auth.TTL = roleEntry.TokenTTL
-	resp.Auth.MaxTTL = roleEntry.TokenMaxTTL
-	resp.Auth.Period = roleEntry.TokenPeriod
+	resp.Auth.TTL = roleEntry.TTL
+	resp.Auth.MaxTTL = roleEntry.MaxTTL
+	resp.Auth.Period = roleEntry.Period
 	return resp, nil
 }
 
@@ -1089,7 +1079,7 @@ func (b *backend) pathLoginRenewEc2(ctx context.Context, req *logical.Request, d
 	}
 
 	// Ensure that role entry is not deleted
-	roleEntry, err := b.role(ctx, req.Storage, storedIdentity.Role)
+	roleEntry, err := b.lockedAWSRole(ctx, req.Storage, storedIdentity.Role)
 	if err != nil {
 		return nil, err
 	}
@@ -1108,11 +1098,11 @@ func (b *backend) pathLoginRenewEc2(ctx context.Context, req *logical.Request, d
 	// Re-evaluate the maxTTL bounds
 	shortestMaxTTL := b.System().MaxLeaseTTL()
 	longestMaxTTL := b.System().MaxLeaseTTL()
-	if roleEntry.TokenMaxTTL > time.Duration(0) && roleEntry.TokenMaxTTL < shortestMaxTTL {
-		shortestMaxTTL = roleEntry.TokenMaxTTL
+	if roleEntry.MaxTTL > time.Duration(0) && roleEntry.MaxTTL < shortestMaxTTL {
+		shortestMaxTTL = roleEntry.MaxTTL
 	}
-	if roleEntry.TokenMaxTTL > longestMaxTTL {
-		longestMaxTTL = roleEntry.TokenMaxTTL
+	if roleEntry.MaxTTL > longestMaxTTL {
+		longestMaxTTL = roleEntry.MaxTTL
 	}
 	if rTagMaxTTL > time.Duration(0) && rTagMaxTTL < shortestMaxTTL {
 		shortestMaxTTL = rTagMaxTTL
@@ -1133,9 +1123,9 @@ func (b *backend) pathLoginRenewEc2(ctx context.Context, req *logical.Request, d
 	}
 
 	resp := &logical.Response{Auth: req.Auth}
-	resp.Auth.TTL = roleEntry.TokenTTL
+	resp.Auth.TTL = roleEntry.TTL
 	resp.Auth.MaxTTL = shortestMaxTTL
-	resp.Auth.Period = roleEntry.TokenPeriod
+	resp.Auth.Period = roleEntry.Period
 	return resp, nil
 }
 
@@ -1215,23 +1205,12 @@ func (b *backend) pathLoginUpdateIam(ctx context.Context, req *logical.Request, 
 		roleName = entity.FriendlyName
 	}
 
-	roleEntry, err := b.role(ctx, req.Storage, roleName)
+	roleEntry, err := b.lockedAWSRole(ctx, req.Storage, roleName)
 	if err != nil {
 		return nil, err
 	}
 	if roleEntry == nil {
 		return logical.ErrorResponse(fmt.Sprintf("entry for role %s not found", roleName)), nil
-	}
-
-	// Check for a CIDR match.
-	if len(roleEntry.TokenBoundCIDRs) > 0 {
-		if req.Connection == nil {
-			b.Logger().Warn("token bound CIDRs found but no connection information available for validation")
-			return nil, logical.ErrPermissionDenied
-		}
-		if !cidrutil.RemoteAddrIsOk(req.Connection.RemoteAddr, roleEntry.TokenBoundCIDRs) {
-			return nil, logical.ErrPermissionDenied
-		}
 	}
 
 	if roleEntry.AuthType != iamAuthType {
@@ -1306,6 +1285,8 @@ func (b *backend) pathLoginUpdateIam(ctx context.Context, req *logical.Request, 
 		}
 	}
 
+	policies := roleEntry.Policies
+
 	inferredEntityType := ""
 	inferredEntityID := ""
 	if roleEntry.InferredEntityType == ec2EntityType {
@@ -1336,32 +1317,38 @@ func (b *backend) pathLoginUpdateIam(ctx context.Context, req *logical.Request, 
 		inferredEntityID = entity.SessionInfo
 	}
 
-	auth := &logical.Auth{
-		Metadata: map[string]string{
-			"client_arn":           callerID.Arn,
-			"canonical_arn":        entity.canonicalArn(),
-			"client_user_id":       callerUniqueId,
-			"auth_type":            iamAuthType,
-			"inferred_entity_type": inferredEntityType,
-			"inferred_entity_id":   inferredEntityID,
-			"inferred_aws_region":  roleEntry.InferredAWSRegion,
-			"account_id":           entity.AccountNumber,
-			"role_id":              roleEntry.RoleID,
-		},
-		InternalData: map[string]interface{}{
-			"role_name": roleName,
-			"role_id":   roleEntry.RoleID,
-		},
-		DisplayName: entity.FriendlyName,
-		Alias: &logical.Alias{
-			Name: identityAlias,
+	resp := &logical.Response{
+		Auth: &logical.Auth{
+			Period:   roleEntry.Period,
+			Policies: policies,
+			Metadata: map[string]string{
+				"client_arn":           callerID.Arn,
+				"canonical_arn":        entity.canonicalArn(),
+				"client_user_id":       callerUniqueId,
+				"auth_type":            iamAuthType,
+				"inferred_entity_type": inferredEntityType,
+				"inferred_entity_id":   inferredEntityID,
+				"inferred_aws_region":  roleEntry.InferredAWSRegion,
+				"account_id":           entity.AccountNumber,
+				"role_id":              roleEntry.RoleID,
+			},
+			InternalData: map[string]interface{}{
+				"role_name": roleName,
+				"role_id":   roleEntry.RoleID,
+			},
+			DisplayName: entity.FriendlyName,
+			LeaseOptions: logical.LeaseOptions{
+				Renewable: true,
+				TTL:       roleEntry.TTL,
+				MaxTTL:    roleEntry.MaxTTL,
+			},
+			Alias: &logical.Alias{
+				Name: identityAlias,
+			},
 		},
 	}
-	roleEntry.PopulateTokenAuth(auth)
 
-	return &logical.Response{
-		Auth: auth,
-	}, nil
+	return resp, nil
 }
 
 // These two methods (hasValuesFor*) return two bools
@@ -1417,10 +1404,6 @@ func parseIamArn(iamArn string) (*iamEntity, error) {
 	// now, entity.FriendlyName should either be <UserName> or <RoleName>
 	switch entity.Type {
 	case "assumed-role":
-		// Check for three parts for assumed role ARNs
-		if len(parts) < 3 {
-			return nil, fmt.Errorf("unrecognized arn: %q contains fewer than 3 slash-separated parts", fullParts[5])
-		}
 		// Assumed roles don't have paths and have a slightly different format
 		// parts[2] is <RoleSessionName>
 		entity.Path = ""

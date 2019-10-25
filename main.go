@@ -7,7 +7,7 @@ import (
 	"github.com/hashicorp/terraform-plugin-sdk/plugin"
 )
 
-const Version = "0.0.4"
+const Version = "0.0.5"
 
 var (
 	Name         string
